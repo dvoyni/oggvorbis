@@ -7,10 +7,14 @@ import (
 	"github.com/jfreymuth/vorbis"
 )
 
+// ErrSetupMismatch is returned by NewReaderWithSetup when the stream's own
+// headers are not the ones the Setup was read from.
+var ErrSetupMismatch = errors.New("oggvorbis: the stream's headers are not the Setup's")
+
 // A Reader can read audio from an ogg/vorbis file.
 type Reader struct {
 	r   oggReader
-	dec vorbis.Decoder
+	dec *vorbis.Decoder
 
 	position       int64
 	buffer         []float32
@@ -24,16 +28,47 @@ type Reader struct {
 // Some of the returned reader's methods will only work if in also implements
 // io.Seeker
 func NewReader(in io.Reader) (*Reader, error) {
+	return newReader(in, nil)
+}
+
+// NewReaderWithSetup creates a Reader over a stream whose Setup has already
+// been read, by ReadSetup or from another Reader on the same stream. The
+// stream's header packets are checked against the Setup rather than parsed
+// again, which is most of what NewReader costs.
+func NewReaderWithSetup(in io.Reader, setup *vorbis.Setup) (*Reader, error) {
+	return newReader(in, setup)
+}
+
+func newReader(in io.Reader, setup *vorbis.Setup) (*Reader, error) {
 	r := new(Reader)
 	r.r.source = in
 	r.r.seeker, _ = in.(io.Seeker)
-	if err := r.init(); err != nil {
+	if err := r.init(setup); err != nil {
 		return nil, err
 	}
 	return r, nil
 }
 
-func (r *Reader) init() error {
+// ReadSetup reads the three header packets that begin an ogg/vorbis stream and
+// returns their Setup. Nothing past the headers is read.
+func ReadSetup(in io.Reader) (*vorbis.Setup, error) {
+	r := oggReader{source: in}
+	var headers [3][]byte
+	for i := range headers {
+		packet, err := r.NextPacket()
+		if err != nil {
+			return nil, noEOF(err)
+		}
+		headers[i] = packet
+	}
+	return vorbis.ReadSetup(headers[0], headers[1], headers[2])
+}
+
+// Setup returns the Setup this Reader decodes with. Another Reader on the same
+// stream can be opened from it with NewReaderWithSetup.
+func (r *Reader) Setup() *vorbis.Setup { return r.dec.Setup() }
+
+func (r *Reader) init(setup *vorbis.Setup) error {
 	if r.r.seeker != nil {
 		length, err := r.r.LastPosition()
 		if err == nil {
@@ -44,16 +79,26 @@ func (r *Reader) init() error {
 	}
 
 	// read headers
-	for i := 0; i < 3; i++ {
+	var headers [3][]byte
+	for i := range headers {
 		packet, err := r.r.NextPacket()
 		if err != nil {
 			return noEOF(err)
 		}
-		err = r.dec.ReadHeader(packet)
+		headers[i] = packet
+	}
+	if setup != nil {
+		if !setup.Matches(headers[0], headers[2]) {
+			return ErrSetupMismatch
+		}
+	} else {
+		var err error
+		setup, err = vorbis.ReadSetup(headers[0], headers[1], headers[2])
 		if err != nil {
 			return err
 		}
 	}
+	r.dec = vorbis.NewDecoder(setup)
 	r.originalBuffer = make([]float32, r.dec.BufferSize())
 
 	// read the first two packets, because the data might not start at position zero, see:
