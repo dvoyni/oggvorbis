@@ -232,6 +232,10 @@ func (p *page) readHeader(r io.Reader) error {
 	size := 0
 	p.totalSize = 0
 	p.packetCount = 0
+	if p.packetSizes == nil {
+		// one entry per segment at most, so this never grows
+		p.packetSizes = make([]int, 0, len(p.segmentTable))
+	}
 	p.packetSizes = p.packetSizes[:0]
 	for _, s := range segmentTable {
 		size += int(s)
